@@ -154,6 +154,15 @@ int loops = -1;
 
 int status = WL_IDLE_STATUS;
 
+#define WX_CATEGORY_MASK 0x000F
+#define WX_CATEGORY_VFR  0x0001
+#define WX_CATEGORY_MVFR 0x0002
+#define WX_CATEGORY_IFR  0x0003
+#define WX_CATEGORY_LIFR 0x0004
+#define WX_FLAG_WINDY   0x0010
+#define WX_FLAG_GUSTY   0x0020
+#define WX_FLAG_TS      0x0040
+
 void setup() {
   //Initialize serial and wait for port to open:
   Serial.begin(74880);
@@ -308,6 +317,34 @@ void loop() {
   }
 }
 
+int metarToWxInt(String airport, int wind, int gusts, String condition, String wxstring) {
+  int wxInt = 0;
+
+  Serial.print(airport);
+  Serial.print(": ");
+  Serial.print(condition);
+  Serial.print(" ");
+  Serial.print(wind);
+  Serial.print("G");
+  Serial.print(gusts);
+  Serial.print("kts WX: ");
+  Serial.println(wxstring);
+
+  if (condition == "LIFR") wxInt |= WX_CATEGORY_LIFR;
+  else if (condition == "IFR") wxInt |= WX_CATEGORY_IFR;
+  else if (condition == "MVFR") wxInt |= WX_CATEGORY_MVFR;
+  else if (condition == "VFR") wxInt |= WX_CATEGORY_VFR;
+
+  if (wind > WIND_THRESHOLD) wxInt |= WX_FLAG_WINDY;
+  if (gusts > WIND_THRESHOLD) wxInt |= WX_FLAG_GUSTY;
+  if (wxstring.indexOf("TS") != -1) {
+    Serial.println("... found lightning!");
+    wxInt |= WX_FLAG_TS;
+  }
+
+  return wxInt;
+}
+
 bool getMetars(){
   lightningLeds.clear(); // clear out existing lightning LEDs since they're global
   fill_solid(leds.data(), leds.size(), CRGB::Black); // Set everything to black just in case there is no report
@@ -392,7 +429,8 @@ bool getMetars(){
         if (currentLine.endsWith("<station_id>")) { // start paying attention
           if (!led.empty()) { // we assume we are recording results at each change in airport
             for (vector<unsigned short int>::iterator it = led.begin(); it != led.end(); ++it) {
-              doColor(currentAirport, *it, currentWind.toInt(), currentGusts.toInt(), currentCondition, currentWxstring);
+              int wxInt = metarToWxInt(currentAirport, currentWind.toInt(), currentGusts.toInt(), currentCondition, currentWxstring);
+              doColor(currentAirport, *it, wxInt);
             }
             led.clear();
           }
@@ -459,51 +497,42 @@ bool getMetars(){
   }
   // need to doColor this for the last airport
   for (vector<unsigned short int>::iterator it = led.begin(); it != led.end(); ++it) {
-    doColor(currentAirport, *it, currentWind.toInt(), currentGusts.toInt(), currentCondition, currentWxstring);
+    int wxInt = metarToWxInt(currentAirport, currentWind.toInt(), currentGusts.toInt(), currentCondition, currentWxstring);
+    doColor(currentAirport, *it, wxInt);
   }
   led.clear();
 
   // Do the key LEDs now if they exist
   for (int i = 0; i < airports.size(); i++) {
     // Use this opportunity to set colors for LEDs in our key then build the request string
-    if (airports[i] == "VFR") leds[i] = CRGB::Green;
-    else if (airports[i] == "WVFR") leds[i] = CRGB::Yellow;
-    else if (airports[i] == "MVFR") leds[i] = CRGB::Blue;
-    else if (airports[i] == "IFR") leds[i] = CRGB::Red;
-    else if (airports[i] == "LIFR") leds[i] = CRGB::Magenta;
+    if (airports[i] == "VFR") doColor(airports[i], i, WX_CATEGORY_VFR);
+    else if (airports[i] == "WVFR") doColor(airports[i], i, WX_CATEGORY_VFR | WX_FLAG_WINDY);
+    else if (airports[i] == "MVFR") doColor(airports[i], i, WX_CATEGORY_MVFR);
+    else if (airports[i] == "IFR") doColor(airports[i], i, WX_CATEGORY_IFR);
+    else if (airports[i] == "LIFR") doColor(airports[i], i, WX_CATEGORY_LIFR);
   }
 
   client.stop();
   return true;
 }
 
-void doColor(String identifier, unsigned short int led, int wind, int gusts, String condition, String wxstring) {
-  CRGB color;
-  Serial.print(identifier);
-  Serial.print(": ");
-  Serial.print(condition);
-  Serial.print(" ");
-  Serial.print(wind);
-  Serial.print("G");
-  Serial.print(gusts);
-  Serial.print("kts LED ");
-  Serial.print(led);
-  Serial.print(" WX: ");
-  Serial.println(wxstring);
-  if (wxstring.indexOf("TS") != -1) {
-    Serial.println("... found lightning!");
-    lightningLeds.push_back(led);
+void doColor(String identifier, unsigned short int led, int condition) {
+  CRGB color = CRGB::Black;
+  switch (condition & WX_CATEGORY_MASK) {
+    case WX_CATEGORY_LIFR: color = CRGB::Magenta; break;
+    case WX_CATEGORY_IFR: color = CRGB::Red; break;
+    case WX_CATEGORY_MVFR: color = CRGB::Blue; break;
+    case WX_CATEGORY_VFR: color = CRGB::Green; break;
   }
-  if (condition == "LIFR") color = CRGB::Magenta;
-  else if (condition == "IFR") color = CRGB::Red;
-  else if (condition == "MVFR") color = CRGB::Blue;
-  else if (condition == "VFR") {
-    if ((wind > WIND_THRESHOLD || gusts > WIND_THRESHOLD) && DO_WINDS) {
+
+  if (condition & WX_CATEGORY_MASK == WX_CATEGORY_VFR) {
+    bool wind_warning = condition & (WX_FLAG_WINDY | WX_FLAG_GUSTY);
+    if (DO_WINDS && wind_warning) {
       color = CRGB::Yellow;
-    } else {
-      color = CRGB::Green;
     }
-  } else color = CRGB::Black;
+  }
+
+  if (condition & WX_FLAG_TS) lightningLeds.push_back(led);
 
   leds[led] = color;
 }
