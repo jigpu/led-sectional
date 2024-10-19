@@ -186,8 +186,8 @@ void setup() {
   FastLED.setBrightness(BRIGHTNESS);
 }
 
-#if USE_LIGHT_SENSOR
 void adjustBrightness() {
+#if USE_LIGHT_SENSOR
   unsigned char brightness;
   float reading;
 
@@ -215,15 +215,13 @@ void adjustBrightness() {
   Serial.println(" brightness");
   FastLED.setBrightness(brightness);
   FastLED.show();
-}
 #endif
+}
 
 void loop() {
   digitalWrite(LED_BUILTIN, LOW); // on if we're awake
 
-  #if USE_LIGHT_SENSOR
   adjustBrightness();
-  #endif
 
   int c;
   loops++;
