@@ -147,7 +147,7 @@ std::vector<unsigned short int> lightningLeds;
 #define RETRY_TIMEOUT 15000 // in ms
 
 #define SERVER "aviationweather.gov"
-#define BASE_URI "/api/data/metar?format=xml&ids="
+#define BASE_URI "/api/data/metar?format=json&ids="
 
 boolean ledStatus = true; // used so leds only indicate connection status on first boot, or after failure
 int loops = -1;
@@ -317,12 +317,14 @@ void loop() {
   }
 }
 
-int metarToWxInt(String airport, int wind, int gusts, String condition, String wxstring) {
+int metarToWxInt(String airport, int wind, int gusts, float visib, int ceiling, String wxstring) {
   int wxInt = 0;
 
   Serial.print(airport);
-  Serial.print(": ");
-  Serial.print(condition);
+  Serial.print(": VIS ");
+  Serial.print(visib);
+  Serial.print(" CEIL ");
+  Serial.print(ceiling);
   Serial.print(" ");
   Serial.print(wind);
   Serial.print("G");
@@ -330,10 +332,10 @@ int metarToWxInt(String airport, int wind, int gusts, String condition, String w
   Serial.print("kts WX: ");
   Serial.println(wxstring);
 
-  if (condition == "LIFR") wxInt |= WX_CATEGORY_LIFR;
-  else if (condition == "IFR") wxInt |= WX_CATEGORY_IFR;
-  else if (condition == "MVFR") wxInt |= WX_CATEGORY_MVFR;
-  else if (condition == "VFR") wxInt |= WX_CATEGORY_VFR;
+  if (visib < 1 || ceiling < 500) wxInt |= WX_CATEGORY_LIFR;
+  else if (visib <= 3 || ceiling <= 1000) wxInt |= WX_CATEGORY_IFR;
+  else if (visib <= 5 || ceiling <= 3000) wxInt |= WX_CATEGORY_MVFR;
+  else wxInt |= WX_CATEGORY_VFR;
 
   if (wind > WIND_THRESHOLD) wxInt |= WX_FLAG_WINDY;
   if (gusts > WIND_THRESHOLD) wxInt |= WX_FLAG_GUSTY;
@@ -345,24 +347,130 @@ int metarToWxInt(String airport, int wind, int gusts, String condition, String w
   return wxInt;
 }
 
+String readUntil(BearSSL::WiFiClientSecure *client, String stop) {
+  uint32_t t = millis();
+  String buf = "";
+  char c;
+
+  while (client->connected()) {
+    if ((millis() - t) >= (READ_TIMEOUT * 1000)) {
+      break;
+    }
+
+    c = client->read();
+    yield(); // Otherwise the WiFi stack can crash
+    if (c < 0) {
+      continue;
+    }
+    if (stop.indexOf(c) >= 0) {
+      return buf;
+    }
+
+    buf += c;
+    t = millis(); // Reset timeout clock
+  }
+  Serial.println("---Timeout---");
+  fill_solid(leds.data(), leds.size(), CRGB::Cyan); // indicate status with LEDs
+  FastLED.show();
+  ledStatus = true;
+  client->stop();
+  return "";
+}
+
+int readCeiling(BearSSL::WiFiClientSecure *client) {
+  String key, value;
+  int ceiling = INT_MAX;
+  bool is_ceiling = false;
+
+  value = readUntil(client, "{]");
+  if (value == "]") {
+    return ceiling;
+  }
+
+  while (true) {
+    value = readUntil(client, "\"]");
+    if (value == "]") {
+      break;
+    }
+    key = readUntil(client, "\"");
+    (void)readUntil(client, ":");
+    if (key == NULL) {
+      break;
+    }
+
+    value = readUntil(client, "\",[}");
+    value.trim();
+    if (value == "\"") {
+      value = readUntil(client, "\"");
+      (void)readUntil(client, ",");
+    }
+
+    if (key == "cover") {
+      is_ceiling = (value == "SCT" || value == "OVC" || value == "OVX");
+    }
+    if (key == "base") {
+      if (is_ceiling && value.toInt() < ceiling) {
+        ceiling = value.toInt();
+      }
+    }
+  }
+
+  return ceiling;
+}
+
+int readSingleMetar(BearSSL::WiFiClientSecure *client) {
+  String airport, wind, gusts, wxstring, visib;
+  int ceiling;
+  String key, value;
+
+  (void)readUntil(client, "{");
+  while (true) {
+    (void)readUntil(client, "\"");
+    key = readUntil(client, "\"");
+    (void)readUntil(client, ":");
+    if (key == NULL) {
+      break;
+    }
+
+    value = readUntil(client, "\",[}");
+    value.trim();
+    if (value == "\"") {
+      value = readUntil(client, "\"");
+      (void)readUntil(client, ",");
+    }
+    else if (value == "[") {
+      // Only the "cloud" key is allowed to be an array.
+      // We'll handle this seperately:
+      ceiling = readCeiling(client);
+      continue;
+    }
+    else if (value == "}") {
+      // We've reached the end of the metar object
+      int wxInt = metarToWxInt(airport, wind.toInt(), gusts.toInt(), visib.toFloat(), ceiling, wxstring);
+      for (int i = 0; i < airports.size(); i++) {
+        if (airports[i] == airport) {
+          doColor(airport, i, wxInt);
+        }
+      }
+      return 0;
+    }
+
+    if (key == "icaoId")        { airport = value;  }
+    else if (key == "wspd")     { wind = value;     }
+    else if (key == "wgst")     { gusts = value;    }
+    else if (key == "wxString") { wxstring = value; }
+    else if (key == "visib")    { visib = value;    }
+  }
+
+  // Ran out of data
+  return -1;
+}
+
+
 bool getMetars(){
   lightningLeds.clear(); // clear out existing lightning LEDs since they're global
   fill_solid(leds.data(), leds.size(), CRGB::Black); // Set everything to black just in case there is no report
   uint32_t t;
-  char c;
-  boolean readingAirport = false;
-  boolean readingCondition = false;
-  boolean readingWind = false;
-  boolean readingGusts = false;
-  boolean readingWxstring = false;
-
-  std::vector<unsigned short int> led;
-  String currentAirport = "";
-  String currentCondition = "";
-  String currentLine = "";
-  String currentWind = "";
-  String currentGusts = "";
-  String currentWxstring = "";
   String airportString = "";
   bool firstAirport = true;
   for (int i = 0; i < airports.size(); i++) {
@@ -421,86 +529,10 @@ bool getMetars(){
 
     Serial.println();
 
-    while (client.connected()) {
-      if ((c = client.read()) >= 0) {
-        yield(); // Otherwise the WiFi stack can crash
-        currentLine += c;
-        if (c == '\n') currentLine = "";
-        if (currentLine.endsWith("<station_id>")) { // start paying attention
-          if (!led.empty()) { // we assume we are recording results at each change in airport
-            for (vector<unsigned short int>::iterator it = led.begin(); it != led.end(); ++it) {
-              int wxInt = metarToWxInt(currentAirport, currentWind.toInt(), currentGusts.toInt(), currentCondition, currentWxstring);
-              doColor(currentAirport, *it, wxInt);
-            }
-            led.clear();
-          }
-          currentAirport = ""; // Reset everything when the airport changes
-          readingAirport = true;
-          currentCondition = "";
-          currentWind = "";
-          currentGusts = "";
-          currentWxstring = "";
-        } else if (readingAirport) {
-          if (!currentLine.endsWith("<")) {
-            currentAirport += c;
-          } else {
-            readingAirport = false;
-            for (unsigned short int i = 0; i < airports.size(); i++) {
-              if (airports[i] == currentAirport) {
-                led.push_back(i);
-              }
-            }
-          }
-        } else if (currentLine.endsWith("<wind_speed_kt>")) {
-          readingWind = true;
-        } else if (readingWind) {
-          if (!currentLine.endsWith("<")) {
-            currentWind += c;
-          } else {
-            readingWind = false;
-          }
-        } else if (currentLine.endsWith("<wind_gust_kt>")) {
-          readingGusts = true;
-        } else if (readingGusts) {
-          if (!currentLine.endsWith("<")) {
-            currentGusts += c;
-          } else {
-            readingGusts = false;
-          }
-        } else if (currentLine.endsWith("<flight_category>")) {
-          readingCondition = true;
-        } else if (readingCondition) {
-          if (!currentLine.endsWith("<")) {
-            currentCondition += c;
-          } else {
-            readingCondition = false;
-          }
-        } else if (currentLine.endsWith("<wx_string>")) {
-          readingWxstring = true;
-        } else if (readingWxstring) {
-          if (!currentLine.endsWith("<")) {
-            currentWxstring += c;
-          } else {
-            readingWxstring = false;
-          }
-        }
-        t = millis(); // Reset timeout clock
-      } else if ((millis() - t) >= (READ_TIMEOUT * 1000)) {
-        Serial.println("---Timeout---");
-        fill_solid(leds.data(), leds.size(), CRGB::Cyan); // indicate status with LEDs
-        FastLED.show();
-        ledStatus = true;
-        client.stop();
-        return false;
-      }
+    while (readSingleMetar(&client)) {
+      // Nothing
     }
   }
-  // need to doColor this for the last airport
-  for (vector<unsigned short int>::iterator it = led.begin(); it != led.end(); ++it) {
-    int wxInt = metarToWxInt(currentAirport, currentWind.toInt(), currentGusts.toInt(), currentCondition, currentWxstring);
-    doColor(currentAirport, *it, wxInt);
-  }
-  led.clear();
 
   // Do the key LEDs now if they exist
   for (int i = 0; i < airports.size(); i++) {
