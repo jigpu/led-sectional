@@ -147,7 +147,7 @@ std::vector<unsigned short int> lightningLeds;
 #define RETRY_TIMEOUT 15000 // in ms
 
 #define SERVER "aviationweather.gov"
-#define BASE_URI "/cgi-bin/data/dataserver.php?dataSource=metars&requestType=retrieve&format=xml&hoursBeforeNow=3&mostRecentForEachStation=true&stationString="
+#define BASE_URI "/api/data/metar?format=xml&ids="
 
 boolean ledStatus = true; // used so leds only indicate connection status on first boot, or after failure
 int loops = -1;
