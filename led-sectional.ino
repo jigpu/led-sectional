@@ -5,7 +5,6 @@ using namespace std;
 
 #define FASTLED_ESP8266_RAW_PIN_ORDER
 
-#define NUM_AIRPORTS 80 // This is really the number of LEDs
 #define WIND_THRESHOLD 25 // Maximum windspeed for green, otherwise the LED turns yellow
 #define LOOP_INTERVAL 5000 // ms - interval between brightness updates and lightning strikes
 #define DO_LIGHTNING true // Lightning uses more power, but is cool.
@@ -20,8 +19,6 @@ using namespace std;
 const char ssid[] = "EDITME"; // your network SSID (name)
 const char pass[] = "EDITME"; // your network password (use for WPA, or use as key for WEP)
 
-// Define the array of leds
-CRGB leds[NUM_AIRPORTS];
 #define DATA_PIN    14 // Kits shipped after March 1, 2019 should use 14. Earlier kits us 5.
 #define LED_TYPE    WS2811
 #define COLOR_ORDER RGB
@@ -51,9 +48,15 @@ Adafruit_TSL2561_Unified tsl = Adafruit_TSL2561_Unified(TSL2561_ADDR_FLOAT, 1234
 #endif
 /* ----------------------------------------------------------------------- */
 
-std::vector<unsigned short int> lightningLeds;
+// This list contains the list of airports in the order that LEDs have
+// been wired up. Its length must match the number of LEDs.
+//
+// The strings "VFR", "WVFR", "MVFR", "IFR", and "LIFR" may be used for
+// a map key and will always be the associated color.
+//
+// The string "NULL" may be used for "no airport"
 std::vector<String> airports({
-  "LIFR", // 1 order of LEDs, starting with 1 should be KKIC; use VFR, WVFR, MVFR, IFR, LIFR for key; NULL for no airport
+  "LIFR", // 1
   "IFR", // 2
   "MVFR", // 3
   "WVFR", // 4
@@ -134,6 +137,8 @@ std::vector<String> airports({
   "NULL", // 79
   "KNLC" // 80
 });
+std::vector<CRGB> leds;
+std::vector<unsigned short int> lightningLeds;
 
 #define DEBUG false
 
@@ -176,7 +181,8 @@ void setup() {
   #endif
 
   // Initialize LEDs
-  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_AIRPORTS).setCorrection(TypicalLEDStrip);
+  leds.resize(airports.size());
+  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds.data(), leds.size()).setCorrection(TypicalLEDStrip);
   FastLED.setBrightness(BRIGHTNESS);
 }
 
@@ -228,7 +234,7 @@ void loop() {
 
   // Connect to WiFi. We always want a wifi connection for the ESP8266
   if (WiFi.status() != WL_CONNECTED) {
-    if (ledStatus) fill_solid(leds, NUM_AIRPORTS, CRGB::Orange); // indicate status with LEDs, but only on first run or error
+    if (ledStatus) fill_solid(leds.data(), leds.size(), CRGB::Orange); // indicate status with LEDs, but only on first run or error
     FastLED.show();
     WiFi.mode(WIFI_STA);
     WiFi.hostname("LED Sectional " + WiFi.macAddress());
@@ -242,13 +248,13 @@ void loop() {
     }
     if (c >= WIFI_TIMEOUT) { // If it didn't connect within WIFI_TIMEOUT
       Serial.println("Failed. Will retry...");
-      fill_solid(leds, NUM_AIRPORTS, CRGB::Orange);
+      fill_solid(leds.data(), leds.size(), CRGB::Orange);
       FastLED.show();
       ledStatus = true;
       return;
     }
     Serial.println("OK!");
-    if (ledStatus) fill_solid(leds, NUM_AIRPORTS, CRGB::Purple); // indicate status with LEDs
+    if (ledStatus) fill_solid(leds.data(), leds.size(), CRGB::Purple); // indicate status with LEDs
     FastLED.show();
     ledStatus = false;
   }
@@ -276,7 +282,7 @@ void loop() {
   if (loops >= loopThreshold || loops == 0) {
     loops = 0;
     if (DEBUG) {
-      fill_gradient_RGB(leds, NUM_AIRPORTS, CRGB::Red, CRGB::Blue); // Just let us know we're running
+      fill_gradient_RGB(leds.data(), leds.size(), CRGB::Red, CRGB::Blue); // Just let us know we're running
       FastLED.show();
     }
 
@@ -306,7 +312,7 @@ void loop() {
 
 bool getMetars(){
   lightningLeds.clear(); // clear out existing lightning LEDs since they're global
-  fill_solid(leds, NUM_AIRPORTS, CRGB::Black); // Set everything to black just in case there is no report
+  fill_solid(leds.data(), leds.size(), CRGB::Black); // Set everything to black just in case there is no report
   uint32_t t;
   char c;
   boolean readingAirport = false;
@@ -324,7 +330,7 @@ bool getMetars(){
   String currentWxstring = "";
   String airportString = "";
   bool firstAirport = true;
-  for (int i = 0; i < NUM_AIRPORTS; i++) {
+  for (int i = 0; i < airports.size(); i++) {
     if (airports[i] != "NULL" && airports[i] != "VFR" && airports[i] != "MVFR" && airports[i] != "WVFR" && airports[i] != "IFR" && airports[i] != "LIFR") {
       if (firstAirport) {
         firstAirport = false;
@@ -403,7 +409,7 @@ bool getMetars(){
             currentAirport += c;
           } else {
             readingAirport = false;
-            for (unsigned short int i = 0; i < NUM_AIRPORTS; i++) {
+            for (unsigned short int i = 0; i < airports.size(); i++) {
               if (airports[i] == currentAirport) {
                 led.push_back(i);
               }
@@ -445,7 +451,7 @@ bool getMetars(){
         t = millis(); // Reset timeout clock
       } else if ((millis() - t) >= (READ_TIMEOUT * 1000)) {
         Serial.println("---Timeout---");
-        fill_solid(leds, NUM_AIRPORTS, CRGB::Cyan); // indicate status with LEDs
+        fill_solid(leds.data(), leds.size(), CRGB::Cyan); // indicate status with LEDs
         FastLED.show();
         ledStatus = true;
         client.stop();
@@ -460,7 +466,7 @@ bool getMetars(){
   led.clear();
 
   // Do the key LEDs now if they exist
-  for (int i = 0; i < (NUM_AIRPORTS); i++) {
+  for (int i = 0; i < airports.size(); i++) {
     // Use this opportunity to set colors for LEDs in our key then build the request string
     if (airports[i] == "VFR") leds[i] = CRGB::Green;
     else if (airports[i] == "WVFR") leds[i] = CRGB::Yellow;
